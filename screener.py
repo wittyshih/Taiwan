@@ -69,7 +69,7 @@ def roc_date(day):
 def listed_quotes(day):
     j = get('https://www.twse.com.tw/exchangeReport/MI_INDEX', {'response':'json','date':day.strftime('%Y%m%d'),'type':'ALLBUT0999'})
     tables = j.get('tables', [])
-        table = next(
+    table = next(
         (t for t in tables if '證券代號' in t.get('fields', [])), None)
     if table:
         fields = table.get('fields', [])
