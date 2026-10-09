@@ -1,0 +1,24 @@
+name: 台股三多自動選股
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '30 8 * * 1-5'
+
+permissions:
+  contents: write
+
+jobs:
+  screen:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 取得專案
+        uses: actions/checkout@v4
+
+      - name: 安裝 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 執行選股
+        run: python screener.py
