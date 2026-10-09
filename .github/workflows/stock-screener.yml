@@ -20,5 +20,8 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: 安裝套件
+        run: pip install requests pandas
+
       - name: 執行選股
         run: python screener.py
