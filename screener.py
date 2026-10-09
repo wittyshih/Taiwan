@@ -68,8 +68,15 @@ def roc_date(day):
 
 def listed_quotes(day):
     j = get('https://www.twse.com.tw/exchangeReport/MI_INDEX', {'response':'json','date':day.strftime('%Y%m%d'),'type':'ALLBUT0999'})
-    fields = j.get('fields9', [])
-    rows = j.get('data9', [])
+    tables = j.get('tables', [])
+        table = next(
+        (t for t in tables if '證券代號' in t.get('fields', [])), None)
+    if table:
+        fields = table.get('fields', [])
+        rows = table.get('data', [])
+    else:
+        fields = j.get('fields9', [])
+        rows = j.get('data9', [])
     if not rows:
         raise RuntimeError('TWSE MI_INDEX data9 unavailable (market holiday or API change)')
     LOG.info('TWSE columns: %s', fields)
