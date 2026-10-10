@@ -23,10 +23,10 @@ S.headers.update({'User-Agent':'Mozilla/5.0 (compatible; TaiwanStockScreener/1.0
 LOG = logging.getLogger('screen')
 
 
-def get(url, params=None, attempts=3):
+def get(url, params=None, attempts=1):
     for i in range(attempts):
         try:
-            r = S.get(url, params=params, timeout=28)
+            r = S.get(url, params=params, timeout=10, allow_redirects=False)
             r.raise_for_status()
             return r.json()
         except (requests.RequestException, ValueError) as e:
