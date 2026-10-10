@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
-"""TWSE + TPEx top-300 gainers; daily/weekly/monthly KD(26,3,3) and volume >=3.2x.
+"""Taiwan TWSE+TPEx top 300 gainers, volume 3.2x, D/W/M KD(26,3,3).
 
-Uses official exchange endpoints. Prefilters by daily volume to avoid fetching
-many months of history for stocks that cannot possibly pass.
+Historical data is unadjusted. Do not overwrite results when APIs fail.
 """
 import datetime as dt
 import json
@@ -11,48 +10,42 @@ import re
 import time
 from collections import defaultdict
 from pathlib import Path
-
 import requests
 
-OUT = Path(__file__).resolve().parent / 'results.json'
-LOG = logging.getLogger('screen')
-SESSION = requests.Session()
-SESSION.headers.update({
-    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/125.0 Safari/537.36',
-    'Accept': 'application/json, text/javascript, */*; q=0.01',
-    'Accept-Language': 'zh-TW,zh;q=0.9,en;q=0.8',
-})
+OUT = Path(__file__).with_name('results.json')
+LOG = logging.getLogger('screener')
+S = requests.Session()
+S.headers.update({'User-Agent': 'Mozilla/5.0 Chrome/125.0 Safari/537.36',
+                  'Accept': 'application/json, */*', 'Referer': 'https://www.tpex.org.tw/'})
 
 
-def get(url, params=None):
-    r = SESSION.get(url, params=params, timeout=12, allow_redirects=False)
-    if 300 <= r.status_code < 400:
-        raise RuntimeError(f'API redirected (HTTP {r.status_code}); location={r.headers.get("Location", "")[:100]}')
+def fetch(url, params):
+    r = S.get(url, params=params, timeout=20)
     r.raise_for_status()
     try:
-        result = r.json()
-    except ValueError as exc:
-        raise RuntimeError(f'API returned non-JSON HTTP {r.status_code}; content-type={r.headers.get("Content-Type", "")}; body={r.text[:100]!r}') from exc
-    if not isinstance(result, dict):
-        raise RuntimeError('Unexpected API JSON structure')
-    return result
+        j = r.json()
+    except ValueError as e:
+        raise RuntimeError(f'Non-JSON API response: {r.status_code} {r.text[:90]!r}') from e
+    if not isinstance(j, dict):
+        raise RuntimeError('Unexpected API JSON response')
+    return j
 
 
-def num(v):
-    if isinstance(v, (int, float)):
-        return float(v)
-    s = re.sub(r'<[^>]+>', '', str(v or '')).replace(',', '').replace('+', '').replace('%', '').strip()
+def number(value):
+    if isinstance(value, (int, float)):
+        return float(value)
+    s = re.sub('<[^>]*>', '', str(value or '')).replace(',', '').replace('+', '').replace('%', '').strip()
     try:
         return float(s)
     except ValueError:
         return None
 
 
-def parse_date(v):
-    p = re.findall(r'\d+', str(v))
-    if len(p) < 3:
+def day_parse(value):
+    x = re.findall(r'\d+', str(value))
+    if len(x) < 3:
         return None
-    y, m, d = map(int, p[:3])
+    y, m, d = map(int, x[:3])
     if y < 1911:
         y += 1911
     try:
@@ -61,138 +54,138 @@ def parse_date(v):
         return None
 
 
-def roc_date(day):
-    return f'{day.year-1911}/{day.month:02d}/{day.day:02d}'
-
-
-def listed_quotes(day):
-    j = get('https://www.twse.com.tw/exchangeReport/MI_INDEX', {
-        'response': 'json', 'date': day.strftime('%Y%m%d'), 'type': 'ALLBUT0999'})
+def tables_of(j):
     tables = j.get('tables') or []
-    table = next((t for t in tables if '證券代號' in (t.get('fields') or [])), None)
-    rows = table.get('data', []) if table else j.get('data9', [])
+    if isinstance(tables, list):
+        return [t for t in tables if isinstance(t, dict) and isinstance(t.get('data'), list)]
+    return []
+
+
+def listed(day):
+    j = fetch('https://www.twse.com.tw/exchangeReport/MI_INDEX',
+              {'response': 'json', 'date': day.strftime('%Y%m%d'), 'type': 'ALLBUT0999'})
+    t = next((t for t in tables_of(j) if '證券代號' in (t.get('fields') or [])), None)
+    rows = t['data'] if t else j.get('data9', [])
     if not rows:
-        raise RuntimeError('TWSE daily quote data unavailable')
-    result = []
+        raise RuntimeError('TWSE daily quotes unavailable')
+    out = []
     for row in rows:
         if len(row) < 11:
             continue
-        code = re.sub(r'<[^>]+>', '', str(row[0])).strip()
-        if not re.fullmatch(r'\d{4}', code):
+        code = re.sub('<[^>]*>', '', str(row[0])).strip()
+        close, change, volume = number(row[8]), number(row[10]), number(row[2])
+        if not re.fullmatch(r'\d{4}', code) or None in (close, change, volume) or close-change <= 0:
             continue
-        close, delta, volume = num(row[8]), num(row[10]), num(row[2])
-        if None in (close, delta, volume) or close - delta <= 0:
-            continue
-        result.append({'code': code, 'name': re.sub(r'<[^>]+>', '', str(row[1])).strip(),
-                       'market': 'TWSE', 'gain_pct': round(delta / (close-delta) * 100, 4),
-                       'close': close, 'volume': volume})
-    if not result:
-        raise RuntimeError('TWSE daily quotes contained no usable stocks')
-    return result
+        out.append(dict(code=code, name=re.sub('<[^>]*>', '', str(row[1])).strip(),
+                        market='TWSE', close=close, volume=volume,
+                        gain_pct=round(100*change/(close-change), 4)))
+    if not out:
+        raise RuntimeError('No usable TWSE daily quotes')
+    return out
 
 
-def otc_quotes(day):
-    j = get('https://www.tpex.org.tw/www/zh-tw/afterTrading/dailyQuotes', {
-        'date': roc_date(day), 'id': '', 'response': 'json'})
-    tables = j.get('tables') or []
-    table = next((t for t in tables if t.get('data') and len(t['data'][0]) >= 10), None)
-    if table is None:
-        raise RuntimeError('TPEx daily quote data unavailable')
-    result = []
-    for row in table['data']:
-        code = re.sub(r'<[^>]+>', '', str(row[0])).strip()
-        if not re.fullmatch(r'\d{4}', code):
+def otc(day):
+    j = fetch('https://www.tpex.org.tw/www/zh-tw/afterTrading/dailyQuotes',
+              {'date': f'{day.year-1911}/{day.month:02d}/{day.day:02d}',
+               'id': '', 'response': 'json'})
+    t = next((t for t in tables_of(j) if t['data'] and len(t['data'][0]) >= 10), None)
+    if not t:
+        raise RuntimeError('TPEx daily quotes unavailable')
+    out = []
+    for row in t['data']:
+        code = re.sub('<[^>]*>', '', str(row[0])).strip()
+        close, change, volume = number(row[2]), number(row[3]), number(row[8])
+        if not re.fullmatch(r'\d{4}', code) or None in (close, change, volume) or close-change <= 0:
             continue
-        close, delta, volume = num(row[2]), num(row[3]), num(row[8])
-        if None in (close, delta, volume) or close - delta <= 0:
-            continue
-        result.append({'code': code, 'name': str(row[1]).strip(), 'market': 'TPEx',
-                       'gain_pct': round(delta / (close-delta) * 100, 4),
-                       'close': close, 'volume': volume})
-    if not result:
-        raise RuntimeError('TPEx daily quotes contained no usable stocks')
-    return result
+        out.append(dict(code=code, name=str(row[1]).strip(), market='TPEx',
+                        close=close, volume=volume, gain_pct=round(100*change/(close-change), 4)))
+    if not out:
+        raise RuntimeError('No usable TPEx daily quotes')
+    return out
 
 
-def month_iter(end, months=32):
+def months(end, count=34):
     y, m = end.year, end.month
-    for _ in range(months):
+    for _ in range(count):
         yield dt.date(y, m, 1)
         m -= 1
         if m == 0:
-            m, y = 12, y - 1
+            m, y = 12, y-1
 
 
-def history_twse(code, end):
+def history(code, market, end):
     out = {}
     failures = 0
-    for day in month_iter(end):
+    for month in months(end):
         try:
-            j = get('https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY', {
-                'response': 'json', 'date': day.strftime('%Y%m%d'), 'stockNo': code})
-            if j.get('stat') != 'OK':
-                raise RuntimeError(f'TWSE history status: {j.get("stat")}')
-            for row in j.get('data', []):
-                if len(row) < 7:
-                    continue
-                date = parse_date(row[0])
-                if date and date <= end:
-                    high, low, close, vol = num(row[4]), num(row[5]), num(row[6]), num(row[1])
-                    if None not in (high, low, close, vol):
-                        out[date] = (high, low, close, vol)
-            failures = 0
-        except (requests.RequestException, RuntimeError) as exc:
-            failures += 1
-            LOG.warning('TWSE history %s %s: %s', code, day, exc)
-            if failures >= 3:
-                raise RuntimeError(f'TWSE history unavailable for {code} (3 consecutive failures)') from exc
-        time.sleep(0.25)
-    return out
-
-
-def history_tpex(code, end):
-    out = {}
-    failures = 0
-    for day in month_iter(end):
-        try:
-            j = get('https://www.tpex.org.tw/www/zh-tw/afterTrading/tradingStock', {
-                'code': code, 'date': roc_date(day), 'response': 'json'})
-            tables = j.get('tables') or []
-            if not tables:
-                raise RuntimeError('TPEx history tables unavailable')
-            for table in tables:
-                for row in table.get('data', []):
+            if market == 'TWSE':
+                j = fetch('https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY',
+                          {'response': 'json', 'date': month.strftime('%Y%m%d'), 'stockNo': code})
+                if j.get('stat') != 'OK':
+                    raise RuntimeError(f'TWSE status {j.get("stat")}')
+                rows = j.get('data') or []
+                for row in rows:
                     if len(row) < 7:
                         continue
-                    date = parse_date(row[0])
-                    if date and date <= end:
-                        vol, high, low, close = num(row[1]), num(row[4]), num(row[5]), num(row[6])
-                        if None not in (high, low, close, vol):
-                            out[date] = (high, low, close, vol)
+                    day = day_parse(row[0])
+                    high, low, close, volume = (number(row[i]) for i in (4, 5, 6, 1))
+                    if day and day <= end and None not in (high, low, close, volume):
+                        out[day] = (high, low, close, volume)
+            else:
+                # Official TPEx monthly historical OHLCV endpoint.
+                # Try Gregorian and ROC year dates for API compatibility.
+                rows = []
+                issues = []
+                for date_text in (month.strftime('%Y/%m/%d'),
+                                  f'{month.year-1911}/{month.month:02d}/{month.day:02d}'):
+                    try:
+                        j = fetch('https://www.tpex.org.tw/www/zh-tw/afterTrading/tradingStock',
+                                  {'code': code, 'date': date_text, 'id': '', 'response': 'json'})
+                        rows = [r for t in tables_of(j) for r in t['data']]
+                        if not rows and isinstance(j.get('data'), list):
+                            rows = j['data']
+                        if rows:
+                            break
+                        issues.append(f'{date_text}: {str(j.get("stat", j.get("message", "empty")))[:60]}')
+                    except (requests.RequestException, RuntimeError, ValueError) as e:
+                        issues.append(f'{date_text}: {str(e)[:60]}')
+                if not rows:
+                    # Fallback to the legacy official TPEx monthly historical endpoint.
+                    legacy = S.get('https://www.tpex.org.tw/web/stock/aftertrading/daily_trading_info/st43_result.php',
+                                   params={'d': f'{month.year-1911}/{month.month:02d}', 'stkno': code}, timeout=20)
+                    legacy.raise_for_status()
+                    old = legacy.json()
+                    rows = old.get('aaData') or old.get('data') or []
+                    if not rows:
+                        raise RuntimeError(f'TPEx monthly history empty: {"; ".join(issues)[:170]}')
+                for row in rows:
+                    if len(row) < 7:
+                        continue
+                    day = day_parse(row[0])
+                    volume, high, low, close = (number(row[i]) for i in (1, 4, 5, 6))
+                    if day and day <= end and None not in (high, low, close, volume):
+                        out[day] = (high, low, close, volume)
             failures = 0
-        except (requests.RequestException, RuntimeError) as exc:
+        except (requests.RequestException, RuntimeError) as e:
             failures += 1
-            LOG.warning('TPEx history %s %s: %s', code, day, exc)
+            LOG.warning('%s history %s %s: %s', market, code, month, e)
             if failures >= 3:
-                raise RuntimeError(f'TPEx history unavailable for {code} (3 consecutive failures)') from exc
-        time.sleep(0.25)
-    return out
+                raise RuntimeError(f'{market} history unavailable for {code}: 3 consecutive errors') from e
+        time.sleep(0.15)
+    return sorted(out.items())
 
 
-def aggregate(items, mode):
-    if mode == 'daily':
+def bars_for(items, frequency):
+    if frequency == 'daily':
         return [v for _, v in items]
     periods = {}
-    for day, (high, low, close, vol) in items:
-        key = (day.isocalendar().year, day.isocalendar().week) if mode == 'weekly' else (day.year, day.month)
+    for day, (high, low, close, volume) in items:
+        key = (day.isocalendar().year, day.isocalendar().week) if frequency == 'weekly' else (day.year, day.month)
         if key not in periods:
-            periods[key] = [high, low, close, vol]
+            periods[key] = [high, low, close, volume]
         else:
-            p = periods[key]
-            p[0] = max(p[0], high)
-            p[1] = min(p[1], low)
-            p[2] = close
-            p[3] += vol
+            bar = periods[key]
+            bar[0], bar[1], bar[2], bar[3] = max(bar[0], high), min(bar[1], low), close, bar[3]+volume
     return list(periods.values())
 
 
@@ -201,96 +194,77 @@ def kd(bars, period=26):
         return None
     k = d = 50.0
     for i in range(period-1, len(bars)):
-        segment = bars[i-period+1:i+1]
-        hi = max(x[0] for x in segment)
-        lo = min(x[1] for x in segment)
-        rsv = 50.0 if hi == lo else (bars[i][2] - lo) / (hi - lo) * 100
-        k = (2*k + rsv) / 3
-        d = (2*d + k) / 3
+        chunk = bars[i-period+1:i+1]
+        high, low = max(b[0] for b in chunk), min(b[1] for b in chunk)
+        rsv = 50.0 if high == low else (bars[i][2]-low)/(high-low)*100
+        k = (2*k+rsv)/3
+        d = (2*d+k)/3
     return {'k': round(k, 3), 'd': round(d, 3)}
 
 
 def evaluate(q, end):
-    history = history_twse(q['code'], end) if q['market'] == 'TWSE' else history_tpex(q['code'], end)
-    items = sorted(history.items())
-    if len(items) < 2:
-        return None, 'insufficient daily data'
-    if items[-1][0] != end:
-        return None, 'history not up to date'
-    prev_vol = items[-2][1][3]
-    if prev_vol <= 0:
+    items = history(q['code'], q['market'], end)
+    if len(items) < 2 or items[-1][0] != end:
+        return None, 'history missing latest day'
+    prior = items[-2][1][3]
+    if prior <= 0:
         return None, 'previous volume zero'
-    ratio = items[-1][1][3] / prev_vol
+    ratio = items[-1][1][3]/prior
     if ratio < 3.2:
         return None, 'volume ratio below 3.2'
-    kds = {mode: kd(aggregate(items, mode)) for mode in ('daily', 'weekly', 'monthly')}
-    if any(v is None for v in kds.values()):
-        return None, 'insufficient KD periods'
-    if not all(v['k'] > v['d'] for v in kds.values()):
-        return None, 'K not greater than D'
-    return {**q, 'volume_ratio': round(ratio, 3), 'kd': kds}, None
+    values = {freq: kd(bars_for(items, freq)) for freq in ('daily', 'weekly', 'monthly')}
+    if any(v is None for v in values.values()):
+        return None, 'insufficient 26-period KD history'
+    if not all(v['k'] > v['d'] for v in values.values()):
+        return None, 'K <= D in one or more periods'
+    return {**q, 'volume_ratio': round(ratio, 3), 'kd': values}, None
+
+
+def quotes_on(day):
+    return listed(day), otc(day)
+
+
+def latest_quotes(before, start=0):
+    for offset in range(start, start+14):
+        day = before-dt.timedelta(days=offset)
+        if day.weekday() >= 5:
+            continue
+        try:
+            a, b = quotes_on(day)
+            return day, a, b
+        except (requests.RequestException, RuntimeError, ValueError) as e:
+            LOG.warning('Quote day %s failed: %s', day, e)
+    raise RuntimeError('No usable TWSE + TPEx quotes in date window; old results preserved')
 
 
 def main():
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
     today = dt.datetime.now(dt.timezone(dt.timedelta(hours=8))).date()
-    latest = None
-    for offset in range(12):
-        day = today - dt.timedelta(days=offset)
-        if day.weekday() >= 5:
-            continue
-        try:
-            listed, otc = listed_quotes(day), otc_quotes(day)
-            latest = (day, listed, otc)
-            break
-        except (requests.RequestException, RuntimeError, ValueError) as exc:
-            LOG.warning('Quote day %s failed: %s', day, exc)
-    if latest is None:
-        raise RuntimeError('Unable to obtain current TWSE and TPEx quotes; previous results preserved')
-    day, listed, otc = latest
-    ranked = sorted(listed + otc, key=lambda x: x['gain_pct'], reverse=True)[:300]
-    previous = None
-    for offset in range(1, 12):
-        prior_day = day - dt.timedelta(days=offset)
-        if prior_day.weekday() >= 5:
-            continue
-        try:
-            prev_listed, prev_otc = listed_quotes(prior_day), otc_quotes(prior_day)
-            previous = (prior_day, {(x['market'], x['code']): x['volume'] for x in prev_listed + prev_otc})
-            break
-        except (requests.RequestException, RuntimeError, ValueError) as exc:
-            LOG.warning('Previous quote day %s failed: %s', prior_day, exc)
-    if previous is None:
-        raise RuntimeError('Unable to obtain previous trading day volumes; previous results preserved')
-    prev_day, prev_volumes = previous
-    candidates = []
-    missing = 0
-    for q in ranked:
-        prev = prev_volumes.get((q['market'], q['code']))
-        if prev is None or prev <= 0:
-            missing += 1
-        elif q['volume'] / prev >= 3.2:
-            candidates.append(q)
-    if missing > len(ranked) // 5:
-        raise RuntimeError(f'Previous volume missing for {missing}/{len(ranked)} stocks; previous results preserved')
-    LOG.info('Top %s stocks, %s pass volume >=3.2x; previous day %s', len(ranked), len(candidates), prev_day)
+    day, a, b = latest_quotes(today)
+    prev_day, prev_a, prev_b = latest_quotes(day, start=1)
+    ranked = sorted(a+b, key=lambda x: x['gain_pct'], reverse=True)[:300]
+    previous = {(q['market'], q['code']): q['volume'] for q in prev_a+prev_b}
+    candidates = [q for q in ranked if previous.get((q['market'], q['code']), 0) > 0
+                  and q['volume']/previous[(q['market'], q['code'])] >= 3.2]
+    LOG.info('Top %d gainers; %d pass volume >=3.2x; quote date %s vs %s',
+             len(ranked), len(candidates), day, prev_day)
     matches, errors, rejected = [], [], defaultdict(int)
-    for idx, q in enumerate(candidates, 1):
+    for index, q in enumerate(candidates, 1):
         try:
             match, reason = evaluate(q, day)
             if match:
                 matches.append(match)
             else:
                 rejected[reason] += 1
-        except (requests.RequestException, RuntimeError, ValueError) as exc:
-            LOG.warning('History failed %s %s: %s', q['code'], q['name'], exc)
-            errors.append({'code': q['code'], 'error': str(exc)[:180]})
-        LOG.info('Progress %s/%s matches=%s errors=%s', idx, len(candidates), len(matches), len(errors))
+        except (requests.RequestException, RuntimeError, ValueError) as e:
+            LOG.warning('History failed %s %s: %s', q['code'], q['name'], e)
+            errors.append({'code': q['code'], 'error': str(e)[:180]})
+        LOG.info('Progress %d/%d matches=%d errors=%d', index, len(candidates), len(matches), len(errors))
+        # Do not silently publish partial results when upstream data is broken.
         if len(errors) >= 3:
-            raise RuntimeError('Multiple history API failures; stopping early and preserving previous results')
-    if candidates and not matches and sum(rejected.get(k, 0) for k in (
-            'history not up to date', 'insufficient daily data', 'insufficient KD periods')) > len(candidates) // 2:
-        raise RuntimeError('Most historical data missing; previous results preserved')
+            raise RuntimeError('3 historical API failures; previous results preserved')
+    if errors:
+        raise RuntimeError(f'{len(errors)} history errors; previous results preserved')
     payload = {
         'date': day.isoformat(),
         'generated_at': dt.datetime.now(dt.timezone(dt.timedelta(hours=8))).isoformat(),
@@ -298,14 +272,12 @@ def main():
         'rules': {'kd_period': 26, 'k_smoothing': 3, 'd_smoothing': 3,
                   'kd': 'K > D on daily, weekly, monthly', 'volume_ratio_min': 3.2},
         'candidate_count': len(ranked), 'volume_prefilter_pass_count': len(candidates),
-        'evaluated_count': len(candidates) - len(errors), 'match_count': len(matches),
-        'error_count': len(errors), 'rejected_counts': dict(rejected),
-        'results': matches, 'errors': errors,
-    }
+        'evaluated_count': len(candidates), 'match_count': len(matches),
+        'error_count': 0, 'rejected_counts': dict(rejected), 'results': matches, 'errors': []}
     tmp = OUT.with_suffix('.tmp')
     tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding='utf-8')
     tmp.replace(OUT)
-    LOG.info('Wrote %s with %s matches', OUT, len(matches))
+    LOG.info('Wrote %s with %d matches', OUT, len(matches))
 
 
 if __name__ == '__main__':
