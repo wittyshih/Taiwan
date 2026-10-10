@@ -1,0 +1,26 @@
+{
+  "date": "2026-10-08",
+  "generated_at": "2026-10-10T13:10:29.260360+08:00",
+  "universe": "TWSE + TPEx",
+  "rank": "daily percentage gain, top 300",
+  "rules": {
+    "kd_period": 26,
+    "k_smoothing": 3,
+    "d_smoothing": 3,
+    "kd": "K > D on daily, weekly, monthly",
+    "volume_ratio_min": 3.2
+  },
+  "candidate_count": 300,
+  "evaluated_count": 300,
+  "match_count": 0,
+  "error_count": 0,
+  "rejected_counts": {
+    "K not greater than D": 2,
+    "volume ratio below 3.2": 50,
+    "insufficient daily data": 228,
+    "insufficient KD periods": 11,
+    "history not up to date": 9
+  },
+  "results": [],
+  "errors": []
+}
