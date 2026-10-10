@@ -25,3 +25,10 @@ jobs:
 
       - name: 執行選股
         run: python screener.py
+      - name: 儲存選股結果
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add results.json
+          git diff --cached --quiet || git commit -m "Update stock screening results"
+          git push
