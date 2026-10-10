@@ -129,7 +129,7 @@ def history_twse(code,end):
     out={}
     for day in month_iter(end):
         try:
-            j=get('https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY,{'response':'json','date':day.strftime('%Y%m%d'),'stockNo':code})
+         j=get('https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY',{'response':'json','date':day.strftime('%Y%m%d'),'stockNo':code})
             for row in j.get('data',[]):
                 date=parse_date(row[0])
                 if date and date<=end:
