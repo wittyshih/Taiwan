@@ -132,7 +132,7 @@ def history_twse(code,end):
          j=get('https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY',{'response':'json','date':day.strftime('%Y%m%d'),'stockNo':code})
          for row in j.get('data',[]):
              date=parse_date(row[0])
-             if date and date<=end:
+                if date and date<=end:
                 high,low,close,vol=num(row[4]),num(row[5]),num(row[6]),num(row[1])
                 if None not in (high,low,close,vol):
                     out[date]=(high,low,close,vol)
